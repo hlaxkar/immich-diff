@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  immich-comparator:
+    build: .
+    container_name: immich-comparator
+    environment:
+      - IMMICH_URL=${IMMICH_URL:-http://localhost:2283}
+      - IMMICH_API_KEY=${IMMICH_API_KEY}
+    volumes:
+      - /path/to/local/media:/media:ro
+    command: ["-d", "/media", "--dry-run"]

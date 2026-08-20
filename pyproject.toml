@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "immich-comparator"
+version = "1.0.0"
+description = "Compare local media files against an Immich server, report backup coverage, and manage duplicate files."
+readme = "README.md"
+authors = [
+    { name = "Immich Comparator Contributors" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.8"
+keywords = ["immich", "photos", "backup", "deduplication", "media", "cli", "exif", "checksum"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Archiving :: Backup",
+    "Topic :: Utilities"
+]
+dependencies = [
+    "tqdm>=4.60.0",
+    "Pillow>=9.0.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/immich-comparator/immich-comparator"
+Documentation = "https://github.com/immich-comparator/immich-comparator#readme"
+Repository = "https://github.com/immich-comparator/immich-comparator"
+
+[project.scripts]
+immich-comparator = "immich_comparator.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["immich_comparator*"]
