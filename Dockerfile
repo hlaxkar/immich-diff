@@ -4,10 +4,10 @@ WORKDIR /app
 
 # Install package dependencies
 COPY pyproject.toml README.md ./
-COPY immich_comparator/ ./immich_comparator/
+COPY immich_diff/ ./immich_diff/
 
 RUN pip install --no-cache-dir .
 
 # Default command shows help; mount local media volume to /media
-ENTRYPOINT ["immich-comparator"]
+ENTRYPOINT ["immich-diff"]
 CMD ["--help"]

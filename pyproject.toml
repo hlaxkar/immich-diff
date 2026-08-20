@@ -3,12 +3,12 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "immich-comparator"
+name = "immich-diff"
 version = "1.0.0"
 description = "Compare local media files against an Immich server, report backup coverage, and manage duplicate files."
 readme = "README.md"
 authors = [
-    { name = "Immich Comparator Contributors" }
+    { name = "Immich Diff Contributors" }
 ]
 license = { text = "MIT" }
 requires-python = ">=3.8"
@@ -32,13 +32,13 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/immich-comparator/immich-comparator"
-Documentation = "https://github.com/immich-comparator/immich-comparator#readme"
-Repository = "https://github.com/immich-comparator/immich-comparator"
+Homepage = "https://github.com/your-username/immich-diff"
+Documentation = "https://github.com/your-username/immich-diff#readme"
+Repository = "https://github.com/your-username/immich-diff"
 
 [project.scripts]
-immich-comparator = "immich_comparator.cli:main"
+immich-diff = "immich_diff.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["immich_comparator*"]
+include = ["immich_diff*"]

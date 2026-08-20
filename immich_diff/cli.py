@@ -1,5 +1,5 @@
 """
-CLI entry point and terminal report renderer for Immich Comparator.
+CLI entry point and terminal report renderer for Immich Diff.
 """
 
 import argparse
@@ -17,10 +17,10 @@ from .utils import format_size, load_dotenv
 
 
 def main():
-    """Main CLI entrypoint for immich-comparator."""
+    """Main CLI entrypoint for immich-diff."""
     load_dotenv()
     parser = argparse.ArgumentParser(
-        prog="immich-comparator",
+        prog="immich-diff",
         description="Compare local media files against an Immich server and handle duplicates.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )

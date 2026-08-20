@@ -84,10 +84,11 @@ def compare_local_files(
     local_files: List[Dict[str, Any]],
     strategy: str = 'all',
     fetch_mode: str = 'auto',
-    max_workers: int = 32
+    max_workers: int = 32,
+    batch_size: int = 100
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str]:
     """
-    Compare local files against Immich assets using targeted API queries (direct) or full server indexing (bulk).
+    Compare local files against Immich assets using targeted API queries / batched checksum checks (direct) or full server indexing (bulk).
     Returns (backed_up_items, not_backed_up_files, actual_fetch_mode).
     """
     use_fn = strategy in ('all', 'filename')
@@ -154,58 +155,121 @@ def compare_local_files(
 
             return (lf, None, 'NONE')
 
-        eval_func = evaluate_file
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(evaluate_file, lf): lf for lf in local_files}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Comparing local files with Immich", file=sys.stdout):
+                lf, matched_asset, reason = future.result()
+                if matched_asset:
+                    immich_size = parse_immich_file_size(matched_asset)
+                    backed_up.append({
+                        'local': lf,
+                        'immich': matched_asset,
+                        'immich_size': immich_size,
+                        'diff': lf['size'] - immich_size,
+                        'match_reason': reason
+                    })
+                else:
+                    not_backed_up.append(lf)
 
-    else:  # 'direct' mode (targeted per-file queries)
-        print(f"--> Using DIRECT mode: Querying Immich API directly for {len(local_files):,} local files...", flush=True)
+    else:  # 'direct' mode with batched checksum checking
+        print(f"--> Using DIRECT mode (Batched API calls): Processing {len(local_files):,} local files in chunks of {batch_size}...", flush=True)
 
-        def evaluate_file_direct(lf: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], str]:
-            filepath = lf['full_path']
-            fname = lf['filename']
+        # 1. Compute SHA-1 checksums for local files in parallel
+        local_checksum_map = {}
+        if use_cs:
+            def hash_worker(lf: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[str]]:
+                return lf, calculate_sha1_b64(lf['full_path'])
 
-            # 1. Filename query
-            if use_fn:
-                matched = client.query_single_metadata({'originalFileName': fname})
-                if matched:
-                    return (lf, matched, 'FILENAME')
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                hash_futures = [executor.submit(hash_worker, lf) for lf in local_files]
+                for future in tqdm(as_completed(hash_futures), total=len(hash_futures), desc="Calculating local SHA-1 hashes", file=sys.stdout):
+                    lf, h_val = future.result()
+                    if h_val:
+                        local_checksum_map[str(lf['full_path'])] = h_val
 
-            # 2. Checksum query
-            if use_cs:
-                checksum = calculate_sha1_b64(filepath)
-                if checksum:
-                    matched = client.query_single_metadata({'checksum': checksum})
-                    if matched:
-                        return (lf, matched, 'CHECKSUM')
+        # 2. Chunk local files into batches of batch_size
+        file_chunks = [local_files[i:i + batch_size] for i in range(0, len(local_files), batch_size)]
 
-            # 3. EXIF timestamp query
-            if use_ex:
-                dt = extract_exif_datetime(filepath)
-                if dt:
-                    t_after = (dt - timedelta(seconds=3)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
-                    t_before = (dt + timedelta(seconds=3)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
-                    matched = client.query_single_metadata({'takenAfter': t_after, 'takenBefore': t_before})
-                    if matched:
-                        return (lf, matched, 'EXIF_TIMESTAMP')
+        with tqdm(total=len(local_files), desc="Comparing local files with Immich", file=sys.stdout) as pbar:
+            for chunk in file_chunks:
+                matched_in_chunk = set()
 
-            return (lf, None, 'NONE')
+                # Step A: Perform batched bulk-upload-check for SHA-1 checksums
+                if use_cs:
+                    check_items = []
+                    path_to_lf = {}
+                    for lf in chunk:
+                        path_str = str(lf['full_path'])
+                        checksum = local_checksum_map.get(path_str)
+                        if checksum:
+                            check_items.append({'id': path_str, 'checksum': checksum})
+                            path_to_lf[path_str] = lf
 
-        eval_func = evaluate_file_direct
+                    if check_items:
+                        results = client.bulk_upload_check(check_items)
+                        if results:
+                            for res in results:
+                                file_id = res.get('id')
+                                action = res.get('action')
+                                reason = res.get('reason')
+                                asset_id = res.get('assetId') or res.get('id')
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(eval_func, lf): lf for lf in local_files}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Comparing local files with Immich", file=sys.stdout):
-            lf, matched_asset, reason = future.result()
-            if matched_asset:
-                immich_size = parse_immich_file_size(matched_asset)
-                backed_up.append({
-                    'local': lf,
-                    'immich': matched_asset,
-                    'immich_size': immich_size,
-                    'diff': lf['size'] - immich_size,
-                    'match_reason': reason
-                })
-            else:
-                not_backed_up.append(lf)
+                                if (action == 'reject' or reason == 'duplicate') and file_id in path_to_lf:
+                                    lf = path_to_lf[file_id]
+                                    matched_asset = {'id': asset_id, 'checksum': local_checksum_map.get(file_id)}
+                                    backed_up.append({
+                                        'local': lf,
+                                        'immich': matched_asset,
+                                        'immich_size': 0,  # bulk-upload-check returns match status
+                                        'diff': lf['size'],
+                                        'match_reason': 'CHECKSUM'
+                                    })
+                                    matched_in_chunk.add(path_str)
+
+                # Step B: Fallback queries for remaining unmatched items in chunk (Filename or EXIF)
+                unmatched_in_chunk = [lf for lf in chunk if str(lf['full_path']) not in matched_in_chunk]
+
+                if unmatched_in_chunk and (use_fn or use_ex):
+                    def evaluate_file_direct(lf: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], str]:
+                        filepath = lf['full_path']
+                        fname = lf['filename']
+
+                        if use_fn:
+                            matched = client.query_single_metadata({'originalFileName': fname})
+                            if matched:
+                                return (lf, matched, 'FILENAME')
+
+                        if use_ex:
+                            dt = extract_exif_datetime(filepath)
+                            if dt:
+                                t_after = (dt - timedelta(seconds=3)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+                                t_before = (dt + timedelta(seconds=3)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+                                matched = client.query_single_metadata({'takenAfter': t_after, 'takenBefore': t_before})
+                                if matched:
+                                    return (lf, matched, 'EXIF_TIMESTAMP')
+
+                        return (lf, None, 'NONE')
+
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = [executor.submit(evaluate_file_direct, lf) for lf in unmatched_in_chunk]
+                        for future in as_completed(futures):
+                            lf, matched_asset, reason = future.result()
+                            if matched_asset:
+                                immich_size = parse_immich_file_size(matched_asset)
+                                backed_up.append({
+                                    'local': lf,
+                                    'immich': matched_asset,
+                                    'immich_size': immich_size,
+                                    'diff': lf['size'] - immich_size,
+                                    'match_reason': reason
+                                })
+                            else:
+                                not_backed_up.append(lf)
+                else:
+                    for lf in unmatched_in_chunk:
+                        not_backed_up.append(lf)
+
+                pbar.update(len(chunk))
 
     return backed_up, not_backed_up, actual_mode
 

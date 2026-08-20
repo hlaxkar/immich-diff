@@ -2,7 +2,6 @@
 Immich API client implementation.
 """
 
-json_import = None
 import json
 import shutil
 import sys
@@ -32,13 +31,28 @@ class ImmichClient:
         req = urllib.request.Request(url, data=data, headers=self.headers, method='POST')
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
-                if resp.status == 200:
+                if resp.status in (200, 201):
                     return json.loads(resp.read().decode('utf-8'))
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 sys.exit(f"Error: Immich API authentication failed (HTTP {e.code}). Please check your API key.")
         except Exception:
             pass
+        return None
+
+    def bulk_upload_check(self, items: List[Dict[str, str]]) -> Optional[List[Dict[str, Any]]]:
+        """
+        Check duplicate status for a batch of assets using POST /api/assets/bulk-upload-check.
+        'items' should be a list of dicts: [{'id': 'local_file_id', 'checksum': 'b64_sha1'}, ...]
+        Returns list of result objects from Immich server.
+        """
+        if not items:
+            return []
+        data = self._post('assets/bulk-upload-check', {'assets': items})
+        if data and isinstance(data, dict):
+            return data.get('results', [])
+        elif isinstance(data, list):
+            return data
         return None
 
     def fetch_all_assets(self) -> List[Dict[str, Any]]:
@@ -106,7 +120,7 @@ class ImmichClient:
 
     def download_asset(self, asset: Dict[str, Any], target_file_path: Path) -> bool:
         """Download asset original or thumbnail file from Immich."""
-        asset_id = asset.get('id')
+        asset_id = asset.get('id') or asset.get('assetId')
         if not asset_id:
             return False
 

@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  immich-comparator:
+  immich-diff:
     build: .
-    container_name: immich-comparator
+    container_name: immich-diff
     environment:
       - IMMICH_URL=${IMMICH_URL:-http://localhost:2283}
       - IMMICH_API_KEY=${IMMICH_API_KEY}

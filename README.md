@@ -1,9 +1,9 @@
-# Immich Media Comparator & Deduplicator (`immich-comparator`)
+# Immich Media Diff & Deduplicator (`immich-diff`)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 
-`immich-comparator` is a powerful Python CLI utility and Docker container designed to compare local media collections (images and videos) against a self-hosted [Immich](https://immich.app/) server.
+`immich-diff` is a powerful Python CLI utility and Docker container designed to compare local media collections (images and videos) against a self-hosted [Immich](https://immich.app/) server.
 
 It reports exact backup coverage, identifies unmatched local files, highlights file size discrepancies, and safely separates local duplicate files into a review folder without altering your Immich library.
 
@@ -15,17 +15,17 @@ It reports exact backup coverage, identifies unmatched local files, highlights f
   * **Filename**: Matches original filenames.
   * **SHA-1 Checksum**: Compares Base64 SHA-1 hashes (chunked 1MB buffer for fast I/O).
   * **EXIF Capture Date**: Matches image capture timestamps from EXIF metadata.
-* **Dual Lookup Modes**:
-  * **Direct Mode**: Fast per-file target API queries ideal for smaller folders.
+* **Optimized Dual Lookup Modes**:
+  * **Direct Mode (Batched API Calls)**: Uses Immich's `POST /api/assets/bulk-upload-check` endpoint to verify 100+ local file checksums in **a single HTTP request** (reducing network calls by 99%).
   * **Bulk Mode**: In-memory O(1) indexed lookup after downloading full server metadata for large photo libraries.
-  * **Auto Mode**: Automatically switches between Direct and Bulk mode based on local file count threshold.
+  * **Auto Mode**: Automatically selects the optimal mode based on file count.
 * **Zero-Risk Read-Only Immich Operations**:
-  * Queries Immich read-only metadata endpoints (`/api/search/metadata`).
+  * Queries Immich read-only metadata and verification endpoints.
   * Never deletes or modifies assets stored on your Immich server.
 * **Safe Duplicate Handling**:
   * Supports `--dry-run` to preview actions before touching any files.
   * Preserves relative folder structure when moving local duplicates.
-  * Isolates SHA-1 and EXIF matches into `_review` subdirectories and optionally downloads the matching Immich asset to `_matched` for side-by-side verification.
+  * Isolates SHA-1 and EXIF matches into `_review` subdirectories for side-by-side verification.
 * **Detailed Backup Statistics Report**:
   * Full breakdown of backed up vs. unique local files.
   * Local vs. Immich file size diffs (local larger, local smaller, identical).
@@ -40,15 +40,15 @@ It reports exact backup coverage, identifies unmatched local files, highlights f
 Clone the repository and install in editable mode:
 
 ```bash
-git clone https://github.com/your-username/immich-comparator.git
-cd immich-comparator
+git clone https://github.com/your-username/immich-diff.git
+cd immich-diff
 pip install -e .
 ```
 
 Verify installation:
 
 ```bash
-immich-comparator --help
+immich-diff --help
 ```
 
 ---
@@ -58,19 +58,19 @@ immich-comparator --help
 Run a **dry-run** comparison scan against a local media directory:
 
 ```bash
-immich-comparator -d /path/to/local/photos -u http://192.168.1.100:2283 -k YOUR_IMMICH_API_KEY --dry-run
+immich-diff -d /path/to/local/photos -u http://192.168.1.100:2283 -k YOUR_IMMICH_API_KEY --dry-run
 ```
 
 Execute duplicate separation (moves duplicate files to `../duplicate` by default):
 
 ```bash
-immich-comparator -d /path/to/local/photos -u http://192.168.1.100:2283 -k YOUR_IMMICH_API_KEY --move
+immich-diff -d /path/to/local/photos -u http://192.168.1.100:2283 -k YOUR_IMMICH_API_KEY --move
 ```
 
 Specify a custom output directory for duplicates:
 
 ```bash
-immich-comparator -d /path/to/local/photos -k YOUR_API_KEY --move -o /path/to/duplicates_folder
+immich-diff -d /path/to/local/photos -k YOUR_API_KEY --move -o /path/to/duplicates_folder
 ```
 
 ---
@@ -81,14 +81,14 @@ Build and run using Docker:
 
 ```bash
 # Build Docker image
-docker build -t immich-comparator .
+docker build -t immich-diff .
 
 # Run dry-run scan
 docker run --rm \
   -v /path/to/local/media:/media:ro \
   -e IMMICH_URL="http://192.168.1.100:2283" \
   -e IMMICH_API_KEY="YOUR_API_KEY" \
-  immich-comparator -d /media --dry-run
+  immich-diff -d /media --dry-run
 ```
 
 #### Docker Compose
@@ -97,9 +97,9 @@ docker run --rm \
 version: '3.8'
 
 services:
-  immich-comparator:
+  immich-diff:
     build: .
-    container_name: immich-comparator
+    container_name: immich-diff
     environment:
       - IMMICH_URL=http://192.168.1.100:2283
       - IMMICH_API_KEY=YOUR_API_KEY_HERE
@@ -119,7 +119,7 @@ IMMICH_URL=http://localhost:2283
 IMMICH_API_KEY=your_immich_api_key_here
 ```
 
-When `.env` is present, you can run `immich-comparator -d /path/to/media` without explicitly passing `-u` or `-k`.
+When `.env` is present, you can run `immich-diff -d /path/to/media` without explicitly passing `-u` or `-k`.
 
 ---
 
@@ -147,7 +147,7 @@ When `.env` is present, you can run `immich-comparator -d /path/to/media` withou
 Scanned Directory: /volume1/Photos/2024
 Immich Server:    http://192.168.1.100:2283/api
 Match Strategy:   ALL
-Lookup Mode:      DIRECT (Direct per-file queries)
+Lookup Mode:      DIRECT (Batched API calls)
 Execution Mode:   [DRY-RUN MODE] (No files will be moved)
 --------------------------------------------------------------------------------
 
