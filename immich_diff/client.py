@@ -5,6 +5,7 @@ Immich API client implementation.
 import json
 import shutil
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 import urllib.error
 import urllib.request
