@@ -5,10 +5,13 @@ Utility functions, constants, and dependency fallbacks for Immich Comparator.
 import base64
 from datetime import datetime, timezone
 import hashlib
+import logging
 import os
 from pathlib import Path
 import sys
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 # Progress bar fallback
 try:
@@ -76,10 +79,35 @@ def normalize_api_url(url: str) -> str:
     return url if url.endswith('/api') else f"{url}/api"
 
 
+def parse_iso_datetime(dt_str: Optional[str]) -> Optional[datetime]:
+    """Parse ISO datetime string from Immich into a naive UTC datetime object."""
+    if not dt_str or not isinstance(dt_str, str):
+        return None
+    clean = dt_str.strip().replace('Z', '+00:00')
+    try:
+        dt = datetime.fromisoformat(clean)
+        # Convert to naive UTC datetime for uniform comparison
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+    except Exception:
+        # Fallback to string slicing YYYY-MM-DDTHH:MM:SS
+        try:
+            s = dt_str[:19].replace(' ', 'T')
+            return datetime.strptime(s, '%Y-%m-%dT%H:%M:%S')
+        except Exception:
+            return None
+
+
 def extract_exif_datetime(filepath: Path) -> Optional[datetime]:
     """Extract capture datetime from image EXIF tags if PIL is available."""
-    if not HAS_PIL or filepath.suffix.lower() not in ('.jpg', '.jpeg', '.tif', '.tiff'):
+    if not HAS_PIL:
         return None
+
+    ext = filepath.suffix.lower()
+    if ext not in IMAGE_EXTENSIONS:
+        return None
+
     try:
         with Image.open(filepath) as img:
             exif = img.getexif()
@@ -89,13 +117,14 @@ def extract_exif_datetime(filepath: Path) -> Optional[datetime]:
                     val = exif.get(tag_id)
                     if val and isinstance(val, str):
                         clean_val = val.strip('\x00 ').strip()
-                        if len(clean_val) >= 19:
+                        for fmt in ('%Y:%m:%d %H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y:%m:%d %H:%M:%S%z'):
                             try:
-                                return datetime.strptime(clean_val[:19], '%Y:%m:%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                                dt = datetime.strptime(clean_val[:19], fmt[: len(clean_val[:19])])
+                                return dt
                             except ValueError:
                                 pass
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Failed to extract EXIF from %s: %s", filepath, e)
     return None
 
 
@@ -107,7 +136,8 @@ def calculate_sha1_b64(filepath: Path) -> Optional[str]:
             while chunk := f.read(1048576):  # 1MB buffer for faster disk I/O
                 sha1.update(chunk)
         return base64.b64encode(sha1.digest()).decode('utf-8')
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to calculate SHA-1 for %s: %s", filepath, e)
         return None
 
 
@@ -115,11 +145,17 @@ def parse_immich_file_size(asset: Dict[str, Any]) -> int:
     """Extract file size in bytes from Immich asset dictionary."""
     exif = asset.get('exifInfo') or {}
     if isinstance(exif, dict) and exif.get('fileSizeInByte') is not None:
-        return int(exif['fileSizeInByte'])
+        try:
+            return int(exif['fileSizeInByte'])
+        except (ValueError, TypeError):
+            pass
 
     for key in ('fileSizeInByte', 'size', 'originalFileSize'):
         if asset.get(key) is not None:
-            return int(asset[key])
+            try:
+                return int(asset[key])
+            except (ValueError, TypeError):
+                pass
 
     return 0
 
@@ -143,5 +179,5 @@ def load_dotenv(dotenv_path: Optional[Path] = None) -> None:
                         if key and key not in os.environ:
                             os.environ[key] = val
                 break
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Error reading .env at %s: %s", path, e)

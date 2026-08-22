@@ -25,7 +25,7 @@ It reports exact backup coverage, identifies unmatched local files, highlights f
 * **Safe Duplicate Handling**:
   * Supports `--dry-run` to preview actions before touching any files.
   * Preserves relative folder structure when moving local duplicates.
-  * Isolates SHA-1 and EXIF matches into `_review` subdirectories for side-by-side verification.
+  * Separates duplicates into isolated strategy folders (`checksum/`, `exif/`, and `filename/`) for easy inspection.
 * **Detailed Backup Statistics Report**:
   * Full breakdown of backed up vs. unique local files.
   * Local vs. Immich file size diffs (local larger, local smaller, identical).
@@ -133,8 +133,11 @@ When `.env` is present, you can run `immich-diff -d /path/to/media` without expl
 | `-m` | `--move` | `False` | Move duplicate files out of the local media directory. |
 | `-n` | `--dry-run` | `False` | Perform a dry-run without moving any files. |
 | `-o` | `--output-dir` | `../duplicate` | Custom destination directory for moved duplicate files. |
-| `-s` | `--strategy` | `all` | Matching strategy (`all`, `filename`, `checksum`, `exif`). |
+| `-s` | `--strategy` | `all` | Matching strategy (`all`, `checksum`, `exif`, `filename`). |
 | `-fm`| `--fetch-mode` | `auto` | Lookup mode (`auto`, `direct`, `bulk`). |
+| `-w` | `--workers` | `auto` | Number of concurrent worker threads. |
+|      | `--download-matched` | `False` | Download matching Immich assets to `_matched` directory when moving duplicates. |
+| `-v` | `--verbose` | `False` | Enable debug logging output. |
 
 ---
 
@@ -174,8 +177,9 @@ STORAGE IMPACT:
 --------------------------------------------------------------------------------
 
 [DRY-RUN] Action Summary:
-  • Would move 1,100 filename-matched duplicates to: /volume1/Photos/duplicate
-  • Would move 80 checksum/EXIF matched files to: /volume1/Photos/duplicate/.../_review/
+  • Would move 1,100 SHA-1 checksum matches to:  /volume1/Photos/duplicate/checksum/
+  • Would move 50 EXIF timestamp matches to:     /volume1/Photos/duplicate/exif/
+  • Would move 30 filename matches to:           /volume1/Photos/duplicate/filename/
 
 To execute actual moving of files, re-run with --move flag.
 ================================================================================

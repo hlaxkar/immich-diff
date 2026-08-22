@@ -1,24 +1,31 @@
 """
-Immich API client implementation.
+Immich API client implementation with retry logic, custom exceptions, and pagination.
 """
 
 import json
+import logging
 import shutil
-import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import urllib.error
 import urllib.request
 
+from .exceptions import ImmichAPIError, ImmichAuthError, ImmichNetworkError
 from .utils import normalize_api_url, tqdm
+
+logger = logging.getLogger(__name__)
 
 
 class ImmichClient:
-    """Encapsulates Immich API network calls, authentication, and URL handling."""
+    """Encapsulates Immich API network calls, authentication, retry logic, and URL handling."""
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, api_key: str, max_retries: int = 3, retry_delay: float = 1.0, timeout: int = 30):
         self.base_url = normalize_api_url(base_url)
         self.api_key = api_key
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.timeout = timeout
         self.headers = {
             'x-api-key': self.api_key,
             'Accept': 'application/json',
@@ -26,22 +33,54 @@ class ImmichClient:
             'User-Agent': 'ImmichMediaComparator/1.0.0'
         }
 
-    def _post(self, endpoint: str, payload_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _request(self, endpoint: str, data: Optional[bytes] = None, method: str = 'GET') -> Any:
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
-        data = json.dumps(payload_dict).encode('utf-8')
-        req = urllib.request.Request(url, data=data, headers=self.headers, method='POST')
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                if resp.status in (200, 201):
-                    return json.loads(resp.read().decode('utf-8'))
-        except urllib.error.HTTPError as e:
-            if e.code in (401, 403):
-                sys.exit(f"Error: Immich API authentication failed (HTTP {e.code}). Please check your API key.")
-        except Exception:
-            pass
-        return None
+        req = urllib.request.Request(url, data=data, headers=self.headers, method=method)
 
-    def bulk_upload_check(self, items: List[Dict[str, str]]) -> Optional[List[Dict[str, Any]]]:
+        last_error = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    if resp.status in (200, 201):
+                        resp_body = resp.read().decode('utf-8')
+                        return json.loads(resp_body)
+                    else:
+                        raise ImmichAPIError(f"Unexpected HTTP status {resp.status} from {url}")
+            except urllib.error.HTTPError as e:
+                if e.code in (401, 403):
+                    raise ImmichAuthError(f"Immich API authentication failed (HTTP {e.code}). Please check your API key.") from e
+                elif e.code >= 500 or e.code == 429:
+                    last_error = ImmichAPIError(f"Immich server error (HTTP {e.code}): {e.reason}")
+                    if attempt < self.max_retries:
+                        sleep_time = self.retry_delay * (2 ** (attempt - 1))
+                        logger.warning(f"HTTP {e.code} error from {url}. Retrying in {sleep_time:.1f}s (attempt {attempt}/{self.max_retries})...")
+                        time.sleep(sleep_time)
+                        continue
+                else:
+                    # Client errors (400, 404, etc.)
+                    raise ImmichAPIError(f"Immich API request failed (HTTP {e.code}): {e.reason}") from e
+            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+                last_error = ImmichNetworkError(f"Network error connecting to {url}: {e}")
+                if attempt < self.max_retries:
+                    sleep_time = self.retry_delay * (2 ** (attempt - 1))
+                    logger.warning(f"Connection error connecting to {url}. Retrying in {sleep_time:.1f}s (attempt {attempt}/{self.max_retries})...")
+                    time.sleep(sleep_time)
+                    continue
+            except json.JSONDecodeError as e:
+                raise ImmichAPIError(f"Failed to decode JSON response from {url}: {e}") from e
+
+        if last_error:
+            raise last_error
+        raise ImmichNetworkError(f"Failed to execute request to {url} after {self.max_retries} attempts.")
+
+    def _post(self, endpoint: str, payload_dict: Dict[str, Any]) -> Any:
+        data = json.dumps(payload_dict).encode('utf-8')
+        return self._request(endpoint, data=data, method='POST')
+
+    def _get(self, endpoint: str) -> Any:
+        return self._request(endpoint, method='GET')
+
+    def bulk_upload_check(self, items: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         """
         Check duplicate status for a batch of assets using POST /api/assets/bulk-upload-check.
         'items' should be a list of dicts: [{'id': 'local_file_id', 'checksum': 'b64_sha1'}, ...]
@@ -49,74 +88,79 @@ class ImmichClient:
         """
         if not items:
             return []
-        data = self._post('assets/bulk-upload-check', {'assets': items})
-        if data and isinstance(data, dict):
-            return data.get('results', [])
-        elif isinstance(data, list):
-            return data
-        return None
+        try:
+            data = self._post('assets/bulk-upload-check', {'assets': items})
+            if data and isinstance(data, dict):
+                return data.get('results', [])
+            elif isinstance(data, list):
+                return data
+        except ImmichAPIError as e:
+            logger.debug("bulk_upload_check API error: %s", e)
+        return []
 
-    def fetch_all_assets(self) -> List[Dict[str, Any]]:
+    def fetch_all_assets(self, show_progress: bool = True) -> List[Dict[str, Any]]:
         """Bulk fetch all assets from Immich API using pagination."""
         assets = []
         page = 1
         page_size = 1000
 
-        print("--> Fetching asset metadata from Immich server...", flush=True)
+        pbar = tqdm(desc="Fetching Immich assets", unit=" assets") if show_progress else None
 
-        with tqdm(desc="Fetching Immich assets", unit=" assets", file=sys.stdout) as pbar:
-            # Try POST /api/search/metadata
+        try:
             while True:
-                data = self._post('search/metadata', {'size': page_size, 'page': page, 'withExif': True})
+                try:
+                    data = self._post('search/metadata', {'size': page_size, 'page': page, 'withExif': True})
+                except ImmichAPIError as e:
+                    # If search/metadata endpoint is not supported (e.g. 404), fall back to GET endpoints
+                    if page == 1:
+                        logger.debug("search/metadata not supported, attempting fallback GET: %s", e)
+                        break
+                    raise
+
                 if not data:
                     break
                 items = data.get('assets', {}).get('items', [])
                 if not items:
                     break
                 assets.extend(items)
-                pbar.update(len(items))
+                if pbar:
+                    pbar.update(len(items))
                 if len(items) < page_size:
                     break
                 page += 1
+        finally:
+            if pbar:
+                pbar.__exit__(None, None, None)
 
         if assets:
-            print(f"--> Successfully loaded {len(assets):,} assets from Immich.", flush=True)
             return assets
 
-        # Fallback to GET /api/asset or GET /api/assets
+        # Fallback to GET /api/asset or GET /api/assets for older Immich server versions
         for endpoint in ['asset', 'assets']:
             try:
-                print(f"--> Trying fallback endpoint GET /api/{endpoint}...", flush=True)
-                req = urllib.request.Request(f"{self.base_url}/{endpoint}", headers=self.headers)
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    if resp.status == 200:
-                        res_data = json.loads(resp.read().decode('utf-8'))
-                        if isinstance(res_data, list):
-                            assets = res_data
-                            break
-                        elif isinstance(res_data, dict):
-                            items = res_data.get('assets', {}).get('items') or res_data.get('items')
-                            if isinstance(items, list) and items:
-                                assets = items
-                                break
-            except urllib.error.HTTPError as e:
-                if e.code in (401, 403):
-                    sys.exit(f"Error: Immich API authentication failed (HTTP {e.code}). Check your API key.")
-            except Exception:
-                pass
-
-        if assets:
-            print(f"--> Successfully loaded {len(assets):,} assets from Immich.", flush=True)
+                res_data = self._get(endpoint)
+                if isinstance(res_data, list):
+                    return res_data
+                elif isinstance(res_data, dict):
+                    items = res_data.get('assets', {}).get('items') or res_data.get('items')
+                    if isinstance(items, list) and items:
+                        return items
+            except ImmichDiffError as e:
+                logger.debug("Fallback endpoint %s failed: %s", endpoint, e)
+                continue
 
         return assets
 
     def query_single_metadata(self, payload_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Perform a single metadata search query on Immich."""
-        data = self._post('search/metadata', {**payload_dict, 'withExif': True})
-        if data:
-            items = data.get('assets', {}).get('items', [])
-            if items:
-                return items[0]
+        try:
+            data = self._post('search/metadata', {**payload_dict, 'withExif': True})
+            if data and isinstance(data, dict):
+                items = data.get('assets', {}).get('items', [])
+                if items:
+                    return items[0]
+        except ImmichDiffError as e:
+            logger.debug("query_single_metadata error: %s", e)
         return None
 
     def download_asset(self, asset: Dict[str, Any], target_file_path: Path) -> bool:
@@ -127,15 +171,15 @@ class ImmichClient:
 
         endpoints = [f"assets/{asset_id}/original", f"assets/{asset_id}/thumbnail"]
         for ep in endpoints:
+            url = f"{self.base_url}/{ep}"
+            req = urllib.request.Request(url, headers={'x-api-key': self.api_key, 'User-Agent': 'ImmichMediaComparator/1.0.0'})
             try:
-                url = f"{self.base_url}/{ep}"
-                req = urllib.request.Request(url, headers={'x-api-key': self.api_key, 'User-Agent': 'ImmichMediaComparator/1.0.0'})
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     if resp.status == 200:
                         target_file_path.parent.mkdir(parents=True, exist_ok=True)
                         with open(target_file_path, 'wb') as f:
                             shutil.copyfileobj(resp, f)
                         return True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed downloading asset %s via %s: %s", asset_id, ep, e)
         return False

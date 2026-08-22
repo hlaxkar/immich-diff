@@ -3,16 +3,19 @@ CLI entry point and terminal report renderer for Immich Diff.
 """
 
 import argparse
+import logging
 import os
 from pathlib import Path
 import sys
 
 from .client import ImmichClient
 from .comparator import (
+    DEFAULT_WORKERS,
     compare_local_files,
     process_duplicate_moves,
     scan_local_media,
 )
+from .exceptions import ImmichDiffError
 from .utils import format_size, load_dotenv
 
 
@@ -29,11 +32,18 @@ def main():
     parser.add_argument('-k', '--api-key', default=os.getenv('IMMICH_API_KEY', ''), type=str, help="Immich API Key")
     parser.add_argument('-m', '--move', action='store_true', help="Move duplicate files into duplicates directory")
     parser.add_argument('-n', '--dry-run', action='store_true', help="Perform dry-run without moving files")
-    parser.add_argument('-o', '--output-dir', default=None, type=str, help="Directory for moved duplicates")
-    parser.add_argument('-s', '--strategy', choices=['all', 'filename', 'checksum', 'exif'], default='all', help="Matching strategy")
-    parser.add_argument('-fm', '--fetch-mode', choices=['auto', 'direct', 'bulk'], default='auto', help="Lookup mode: direct (targeted per-file query), bulk (download full server index), auto (smart threshold)")
+    parser.add_argument('-o', '--output-dir', default=None, type=str, help="Directory for moved duplicates (default: ../duplicate)")
+    parser.add_argument('-s', '--strategy', choices=['all', 'checksum', 'exif', 'filename'], default='all', help="Matching strategy (all prioritizes checksum first, then exif, then filename)")
+    parser.add_argument('-fm', '--fetch-mode', choices=['auto', 'direct', 'bulk'], default='auto', help="Lookup mode: direct (batched API queries), bulk (download full server index), auto (smart threshold)")
+    parser.add_argument('-w', '--workers', default=DEFAULT_WORKERS, type=int, help="Number of concurrent worker threads")
+    parser.add_argument('--download-matched', action='store_true', help="Download matching Immich assets to _matched directory when moving duplicates")
+    parser.add_argument('-v', '--verbose', action='store_true', help="Enable debug logging output")
 
     args = parser.parse_args()
+
+    # Configure logging
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(level=log_level, format="[%(levelname)s] %(message)s")
 
     scanned_dir = Path(args.dir).resolve()
     if not scanned_dir.is_dir():
@@ -56,11 +66,24 @@ def main():
 
     # 2. Compare local files with Immich
     print(f"--> Connecting to Immich server at {client.base_url} (Strategy: {args.strategy.upper()})...", flush=True)
-    backed_up, not_backed_up, actual_mode = compare_local_files(client, local_files, strategy=args.strategy, fetch_mode=args.fetch_mode)
+    try:
+        backed_up, not_backed_up, actual_mode = compare_local_files(
+            client=client,
+            local_files=local_files,
+            strategy=args.strategy,
+            fetch_mode=args.fetch_mode,
+            max_workers=args.workers
+        )
+    except ImmichDiffError as e:
+        sys.exit(f"\nError: {e}")
+    except Exception as e:
+        if args.verbose:
+            raise
+        sys.exit(f"\nUnexpected error during comparison: {e}")
 
     # 3. Categorize Results
-    match_reasons = {'FILENAME': 0, 'CHECKSUM': 0, 'EXIF_TIMESTAMP': 0}
-    match_reason_sizes = {'FILENAME': 0, 'CHECKSUM': 0, 'EXIF_TIMESTAMP': 0}
+    match_reasons = {'CHECKSUM': 0, 'EXIF_TIMESTAMP': 0, 'FILENAME': 0}
+    match_reason_sizes = {'CHECKSUM': 0, 'EXIF_TIMESTAMP': 0, 'FILENAME': 0}
     larger_local, smaller_local, equal_size, unknown_size = [], [], [], []
 
     total_local_size = sum(f['size'] for f in local_files)
@@ -101,7 +124,7 @@ def main():
     print(f"Scanned Directory: {scanned_dir}")
     print(f"Immich Server:    {client.base_url}")
     print(f"Match Strategy:   {args.strategy.upper()}")
-    print(f"Lookup Mode:      {actual_mode.upper()} ({'Direct per-file queries' if actual_mode == 'direct' else 'Full server asset index'})")
+    print(f"Lookup Mode:      {actual_mode.upper()} ({'Batched per-file queries' if actual_mode == 'direct' else 'Full server asset index'})")
     print(f"Execution Mode:   {mode_str}")
     print("-" * 80)
 
@@ -112,9 +135,9 @@ def main():
 
     print("\nIMMICH BACKUP STATUS:")
     print(f"  ✓ Backed Up on Immich:     {len(backed_up):,} files ({format_size(backed_up_size)}) [{backed_up_pct:.2f}%]")
-    print(f"    - Matched by Filename:       {match_reasons.get('FILENAME', 0):,} files ({format_size(match_reason_sizes.get('FILENAME', 0))})")
-    print(f"    - Matched by SHA-1 Checksum: {match_reasons.get('CHECKSUM', 0):,} files ({format_size(match_reason_sizes.get('CHECKSUM', 0))})")
-    print(f"    - Matched by EXIF Timestamp: {match_reasons.get('EXIF_TIMESTAMP', 0):,} files ({format_size(match_reason_sizes.get('EXIF_TIMESTAMP', 0))})")
+    print(f"    - Matched by SHA-1 Hash:     {match_reasons.get('CHECKSUM', 0):,} files ({format_size(match_reason_sizes.get('CHECKSUM', 0))}) [Exact]")
+    print(f"    - Matched by EXIF Timestamp: {match_reasons.get('EXIF_TIMESTAMP', 0):,} files ({format_size(match_reason_sizes.get('EXIF_TIMESTAMP', 0))}) [Review]")
+    print(f"    - Matched by Filename:       {match_reasons.get('FILENAME', 0):,} files ({format_size(match_reason_sizes.get('FILENAME', 0))}) [Review]")
     print(f"  ✗ Not Backed Up (Unique):  {len(not_backed_up):,} files ({format_size(not_backed_up_size)}) [{not_backed_up_pct:.2f}%]")
 
     print("\nFILE SIZE COMPARISON (Matched Assets):")
@@ -125,36 +148,65 @@ def main():
     print(f"  • Local Larger than Immich:  {len(larger_local):,} files (Difference: +{format_size(larger_diff)})")
     print(f"  • Local Smaller than Immich: {len(smaller_local):,} files (Difference: -{format_size(smaller_diff)})")
     if unknown_size:
-        print(f"  • Unknown Immich File Size:  {len(unknown_size):,} files")
+        print(f"  • Direct Mode / Uncached:    {len(unknown_size):,} files")
 
     print("\nSTORAGE IMPACT:")
     print(f"  Total Size of Local Duplicates: {format_size(backed_up_size)}")
-    print(f"  Recoverable Storage space:     {format_size(backed_up_size)} (if duplicates are removed)")
+    print(f"  Recoverable Storage Space:     {format_size(backed_up_size)} (if duplicates are removed)")
 
     # 5. Move Duplicates or Report Actions
     duplicates_base_dir = Path(args.output_dir).resolve() if args.output_dir else scanned_dir.parent / "duplicate"
-    filename_duplicates = [item for item in backed_up if item['match_reason'] == 'FILENAME']
-    review_duplicates = [item for item in backed_up if item['match_reason'] in ('CHECKSUM', 'EXIF_TIMESTAMP')]
+    checksum_matches = [item for item in backed_up if item['match_reason'] == 'CHECKSUM']
+    exif_matches = [item for item in backed_up if item['match_reason'] == 'EXIF_TIMESTAMP']
+    filename_matches = [item for item in backed_up if item['match_reason'] == 'FILENAME']
 
     print("-" * 80)
     if backed_up:
         if is_dry_run:
             print("\n[DRY-RUN] Action Summary:")
-            if filename_duplicates:
-                print(f"  • Would move {len(filename_duplicates):,} filename-matched duplicates to: {duplicates_base_dir}")
-            if review_duplicates:
-                print(f"  • Would move {len(review_duplicates):,} checksum/EXIF matched files to: {duplicates_base_dir}/.../_review/")
+            if checksum_matches:
+                print(f"  • Would move {len(checksum_matches):,} SHA-1 checksum matches to:  {duplicates_base_dir}/checksum/")
+            if exif_matches:
+                print(f"  • Would move {len(exif_matches):,} EXIF timestamp matches to:     {duplicates_base_dir}/exif/")
+            if filename_matches:
+                print(f"  • Would move {len(filename_matches):,} filename matches to:           {duplicates_base_dir}/filename/")
             print("\nTo execute actual moving of files, re-run with --move flag.")
         else:
-            if filename_duplicates:
-                print(f"\n[MOVE] Moving {len(filename_duplicates):,} filename duplicates to {duplicates_base_dir} ...")
-                moved, errs = process_duplicate_moves(client, filename_duplicates, duplicates_base_dir, is_review=False, desc="Moving filename duplicates")
-                print(f"Successfully moved {moved:,} filename duplicates (Errors: {errs}).")
+            if checksum_matches:
+                print(f"\n[MOVE] Moving {len(checksum_matches):,} SHA-1 checksum matches to {duplicates_base_dir}/checksum/ ...")
+                moved, errs = process_duplicate_moves(
+                    client=client,
+                    items=checksum_matches,
+                    base_dest_dir=duplicates_base_dir,
+                    subfolder="checksum",
+                    desc="Moving checksum matches",
+                    download_matched=args.download_matched
+                )
+                print(f"Successfully moved {moved:,} checksum matches (Errors: {errs}).")
 
-            if review_duplicates:
-                print(f"\n[MOVE] Moving {len(review_duplicates):,} SHA-1 / EXIF matches for review to {duplicates_base_dir} ...")
-                moved, errs = process_duplicate_moves(client, review_duplicates, duplicates_base_dir, is_review=True, desc="Moving review files")
-                print(f"Successfully moved {moved:,} review files (Errors: {errs}).")
+            if exif_matches:
+                print(f"\n[MOVE] Moving {len(exif_matches):,} EXIF timestamp matches to {duplicates_base_dir}/exif/ ...")
+                moved, errs = process_duplicate_moves(
+                    client=client,
+                    items=exif_matches,
+                    base_dest_dir=duplicates_base_dir,
+                    subfolder="exif",
+                    desc="Moving EXIF matches",
+                    download_matched=args.download_matched
+                )
+                print(f"Successfully moved {moved:,} EXIF matches (Errors: {errs}).")
+
+            if filename_matches:
+                print(f"\n[MOVE] Moving {len(filename_matches):,} filename matches to {duplicates_base_dir}/filename/ ...")
+                moved, errs = process_duplicate_moves(
+                    client=client,
+                    items=filename_matches,
+                    base_dest_dir=duplicates_base_dir,
+                    subfolder="filename",
+                    desc="Moving filename matches",
+                    download_matched=args.download_matched
+                )
+                print(f"Successfully moved {moved:,} filename matches (Errors: {errs}).")
     else:
         print("\nNo duplicate files found to move.")
 
