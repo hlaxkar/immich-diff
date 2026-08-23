@@ -245,7 +245,7 @@ def compare_local_files(
                                     'diff': lf['size'],
                                     'match_reason': 'CHECKSUM'
                                 })
-                                matched_in_chunk.add(path_str)
+                                matched_in_chunk.add(file_id)
 
                 # Step B: Fallback queries for remaining unmatched items in chunk (EXIF or Filename)
                 unmatched_in_chunk = [lf for lf in chunk if str(lf['full_path']) not in matched_in_chunk]
@@ -292,7 +292,16 @@ def compare_local_files(
 
                 pbar.update(len(chunk))
 
-    return backed_up, not_backed_up, actual_mode
+    # Safeguard: ensure each local file path is present at most once in backed_up
+    seen_paths = set()
+    deduped_backed_up = []
+    for item in backed_up:
+        path_key = str(item['local']['full_path'])
+        if path_key not in seen_paths:
+            seen_paths.add(path_key)
+            deduped_backed_up.append(item)
+
+    return deduped_backed_up, not_backed_up, actual_mode
 
 
 def safe_move_file(src_path: Path, dest_path: Path) -> Path:

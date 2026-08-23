@@ -171,6 +171,44 @@ class TestComparator(unittest.TestCase):
             self.assertTrue((dest_dir / "checksum" / "photo2.jpg").exists())
             mock_client.download_asset.assert_called_once()
 
+    def test_compare_local_files_direct_mode_no_duplicate_match(self):
+        """Test that in direct mode, files matched by checksum are NOT also matched by filename."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            file1 = temp_path / "img1.jpg"
+            file2 = temp_path / "img2.jpg"
+            file1.write_bytes(b"data1")
+            file2.write_bytes(b"data2")
+
+            local_files = scan_local_media(temp_path)
+            self.assertEqual(len(local_files), 2)
+
+            mock_client = MagicMock(spec=ImmichClient)
+            # Both files matched via bulk_upload_check
+            mock_client.bulk_upload_check.return_value = [
+                {'id': str(file1), 'action': 'reject', 'reason': 'duplicate', 'assetId': 'srv-1'},
+                {'id': str(file2), 'action': 'reject', 'reason': 'duplicate', 'assetId': 'srv-2'}
+            ]
+            # If query_single_metadata were called, it would return a filename match
+            mock_client.query_single_metadata.return_value = {'id': 'srv-filename-match', 'originalFileName': 'img1.jpg'}
+
+            backed_up, not_backed_up, mode = compare_local_files(
+                client=mock_client,
+                local_files=local_files,
+                strategy='all',
+                fetch_mode='direct',
+                max_workers=1,
+                batch_size=10
+            )
+
+            # Each file should only appear once in backed_up!
+            self.assertEqual(len(backed_up), 2)
+            self.assertEqual(len(not_backed_up), 0)
+            reasons = [item['match_reason'] for item in backed_up]
+            self.assertEqual(reasons, ['CHECKSUM', 'CHECKSUM'])
+            # query_single_metadata should NOT have been called because all were matched by checksum
+            mock_client.query_single_metadata.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
