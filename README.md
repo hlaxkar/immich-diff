@@ -11,10 +11,10 @@ It reports exact backup coverage, identifies unmatched local files, highlights f
 
 ## Key Features
 
-* **Multi-Strategy Matching**:
-  * **Filename**: Matches original filenames.
-  * **SHA-1 Checksum**: Compares Base64 SHA-1 hashes (chunked 1MB buffer for fast I/O).
-  * **EXIF Capture Date**: Matches image capture timestamps from EXIF metadata.
+* **Multi-Strategy Prioritized Matching**:
+  * **SHA-1 Checksum [Exact]**: Deterministic Base64 SHA-1 hashes (chunked 1MB buffer for fast I/O).
+  * **EXIF Capture Date [Review]**: Matches image capture timestamps from EXIF metadata (`DateTimeOriginal`).
+  * **Filename [Review]**: Matches original filenames (useful for finding compressed / lower-resolution copies on Immich).
 * **Optimized Dual Lookup Modes**:
   * **Direct Mode (Batched API Calls)**: Uses Immich's `POST /api/assets/bulk-upload-check` endpoint to verify 100+ local file checksums in **a single HTTP request** (reducing network calls by 99%).
   * **Bulk Mode**: In-memory O(1) indexed lookup after downloading full server metadata for large photo libraries.
@@ -161,9 +161,9 @@ LOCAL MEDIA SUMMARY:
 
 IMMICH BACKUP STATUS:
   ✓ Backed Up on Immich:     1,180 files (4.50 GB) [94.40%]
-    - Matched by Filename:       1,100 files (4.10 GB)
-    - Matched by SHA-1 Checksum: 50 files (250.00 MB)
-    - Matched by EXIF Timestamp: 30 files (150.00 MB)
+    - Matched by SHA-1 Hash:     1,100 files (4.10 GB) [Exact]
+    - Matched by EXIF Timestamp: 50 files (250.00 MB) [Review]
+    - Matched by Filename:       30 files (150.00 MB) [Review]
   ✗ Not Backed Up (Unique):  70 files (350.00 MB) [5.60%]
 
 FILE SIZE COMPARISON (Matched Assets):
