@@ -2,6 +2,7 @@
 Unit tests for comparator module.
 """
 
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ from immich_diff.comparator import (
     safe_move_file,
     scan_local_media,
 )
+from immich_diff.utils import to_extended_path
 
 
 class TestComparator(unittest.TestCase):
@@ -78,6 +80,30 @@ class TestComparator(unittest.TestCase):
             moved = safe_move_file(src_file, src_file)
             self.assertEqual(moved.resolve(), src_file.resolve())
             self.assertTrue(src_file.exists())
+
+    def test_safe_move_file_trailing_space_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            src_dir = temp_path / "folder "
+            os.makedirs(to_extended_path(src_dir), exist_ok=True)
+            src_file = src_dir / "image.jpg"
+            with open(to_extended_path(src_file), "w") as f:
+                f.write("content")
+
+            dest_dir = temp_path / "dest_folder "
+            dest_file = dest_dir / "image.jpg"
+
+            moved = safe_move_file(src_file, dest_file)
+            self.assertTrue(os.path.exists(to_extended_path(moved)))
+            self.assertFalse(os.path.exists(to_extended_path(src_file)))
+
+            # Clean up trailing space folders so TemporaryDirectory can clean up on Windows
+            if os.path.exists(to_extended_path(moved)):
+                os.remove(to_extended_path(moved))
+            if os.path.exists(to_extended_path(dest_dir)):
+                os.rmdir(to_extended_path(dest_dir))
+            if os.path.exists(to_extended_path(src_dir)):
+                os.rmdir(to_extended_path(src_dir))
 
     def test_compare_local_files_priority_checksum_over_filename(self):
         with tempfile.TemporaryDirectory() as temp_dir:

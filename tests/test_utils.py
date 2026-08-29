@@ -16,6 +16,7 @@ from immich_diff.utils import (
     normalize_api_url,
     parse_immich_file_size,
     parse_iso_datetime,
+    to_extended_path,
 )
 
 
@@ -93,6 +94,20 @@ class TestUtils(unittest.TestCase):
             temp_path.unlink()
             os.environ.pop('TEST_IMMICH_VAR', None)
             os.environ.pop('ANOTHER_VAR', None)
+
+    def test_to_extended_path(self):
+        self.assertEqual(to_extended_path(None), "")
+        self.assertEqual(to_extended_path(""), "")
+        if os.name == 'nt':
+            self.assertEqual(to_extended_path(r"C:\test\folder \file.jpg"), r"\\?\C:\test\folder \file.jpg")
+            self.assertEqual(to_extended_path(r"C:\test\folder \..\other \file.jpg"), r"\\?\C:\test\other \file.jpg")
+            self.assertEqual(to_extended_path(r"\\server\share\test"), r"\\?\UNC\server\share\test")
+            self.assertEqual(to_extended_path(r"\\server\share\test\..\other"), r"\\?\UNC\server\share\other")
+            self.assertEqual(to_extended_path(r"\\?\C:\already\prefixed"), r"\\?\C:\already\prefixed")
+            self.assertEqual(to_extended_path(r"\\?\C:\already\prefixed\..\folder "), r"\\?\C:\already\folder ")
+            self.assertEqual(to_extended_path(r"\\?\UNC\server\share\..\other"), r"\\?\UNC\server\other")
+        else:
+            self.assertEqual(to_extended_path("/tmp/test"), "/tmp/test")
 
 
 if __name__ == '__main__':

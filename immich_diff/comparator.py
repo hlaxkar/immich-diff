@@ -19,6 +19,7 @@ from .utils import (
     extract_exif_datetime,
     parse_immich_file_size,
     parse_iso_datetime,
+    to_extended_path,
     tqdm,
 )
 
@@ -306,21 +307,26 @@ def compare_local_files(
 
 def safe_move_file(src_path: Path, dest_path: Path) -> Path:
     """Move file to dest_path safely without overwriting existing files or self-moving."""
-    src_resolved = src_path.resolve()
-    dest_resolved = dest_path.resolve()
+    src_ext = to_extended_path(src_path)
+    dest_ext = to_extended_path(dest_path)
 
-    if src_resolved == dest_resolved:
-        return src_resolved
+    if os.path.normcase(os.path.normpath(src_ext)) == os.path.normcase(os.path.normpath(dest_ext)):
+        return Path(src_path)
 
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    target = dest_path
+    dest_dir_ext = to_extended_path(dest_path.parent)
+    os.makedirs(dest_dir_ext, exist_ok=True)
+
+    target_ext = dest_ext
+    target_path = dest_path
     counter = 1
-    while target.exists() and target.resolve() != src_resolved:
-        target = dest_path.parent / f"{dest_path.stem}_{counter}{dest_path.suffix}"
+
+    while os.path.exists(target_ext) and os.path.normcase(os.path.normpath(target_ext)) != os.path.normcase(os.path.normpath(src_ext)):
+        target_path = dest_path.parent / f"{dest_path.stem}_{counter}{dest_path.suffix}"
+        target_ext = to_extended_path(target_path)
         counter += 1
 
-    shutil.move(src_resolved, target)
-    return target
+    shutil.move(src_ext, target_ext)
+    return target_path
 
 
 def process_duplicate_moves(
@@ -354,7 +360,7 @@ def process_duplicate_moves(
                 matched_dir = moved_dest.parent / "_matched"
                 orig_name = item['immich'].get('originalFileName') or item['immich'].get('filename') or moved_dest.name
                 matched_file_path = matched_dir / f"{moved_dest.stem}_immich_{orig_name}"
-                if not matched_file_path.exists():
+                if not os.path.exists(to_extended_path(matched_file_path)):
                     client.download_asset(item['immich'], matched_file_path)
         except Exception as e:
             logger.error("Error moving %s -> %s: %s", src_path, dest_file, e)

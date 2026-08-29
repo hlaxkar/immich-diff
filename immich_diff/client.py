@@ -4,6 +4,7 @@ Immich API client implementation with retry logic, custom exceptions, and pagina
 
 import json
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -12,7 +13,7 @@ import urllib.error
 import urllib.request
 
 from .exceptions import ImmichAPIError, ImmichAuthError, ImmichNetworkError
-from .utils import normalize_api_url, tqdm
+from .utils import normalize_api_url, to_extended_path, tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -123,13 +124,13 @@ class ImmichClient:
                 if not items:
                     break
                 assets.extend(items)
-                if pbar:
+                if pbar is not None:
                     pbar.update(len(items))
                 if len(items) < page_size:
                     break
                 page += 1
         finally:
-            if pbar:
+            if pbar is not None:
                 pbar.__exit__(None, None, None)
 
         if assets:
@@ -176,8 +177,9 @@ class ImmichClient:
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     if resp.status == 200:
-                        target_file_path.parent.mkdir(parents=True, exist_ok=True)
-                        with open(target_file_path, 'wb') as f:
+                        target_ext = to_extended_path(target_file_path)
+                        os.makedirs(os.path.dirname(target_ext), exist_ok=True)
+                        with open(target_ext, 'wb') as f:
                             shutil.copyfileobj(resp, f)
                         return True
             except Exception as e:

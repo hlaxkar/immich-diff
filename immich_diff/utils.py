@@ -99,6 +99,36 @@ def parse_iso_datetime(dt_str: Optional[str]) -> Optional[datetime]:
             return None
 
 
+def to_extended_path(path: Any) -> str:
+    """
+    Convert a filesystem path to a Windows extended-length path (\\\\?\\) on Windows systems.
+    Preserves trailing spaces and trailing dots in directory and file names,
+    and bypasses the 260-character MAX_PATH limit on Windows.
+    """
+    if not path:
+        return ""
+    path_str = str(path)
+    if not path_str:
+        return ""
+    if sys.platform == 'win32':
+        if path_str.startswith('\\\\?\\UNC\\'):
+            unc_part = path_str[8:]
+            return '\\\\?\\UNC\\' + os.path.normpath(unc_part.replace('/', '\\'))
+        if path_str.startswith('\\\\?\\'):
+            drive_part = path_str[4:]
+            return '\\\\?\\' + os.path.normpath(drive_part.replace('/', '\\'))
+        norm_str = path_str.replace('/', '\\')
+        if norm_str.startswith('\\\\'):
+            return '\\\\?\\UNC\\' + os.path.normpath(norm_str.lstrip('\\'))
+        if not (len(norm_str) >= 2 and norm_str[1] == ':'):
+            norm_str = os.path.join(os.getcwd(), norm_str)
+        norm_str = os.path.normpath(norm_str)
+        if len(norm_str) >= 2 and norm_str[1] == ':':
+            return '\\\\?\\' + norm_str
+        return norm_str
+    return path_str
+
+
 def extract_exif_datetime(filepath: Path) -> Optional[datetime]:
     """Extract capture datetime from image EXIF tags if PIL is available."""
     if not HAS_PIL:
@@ -109,7 +139,7 @@ def extract_exif_datetime(filepath: Path) -> Optional[datetime]:
         return None
 
     try:
-        with Image.open(filepath) as img:
+        with Image.open(to_extended_path(filepath)) as img:
             exif = img.getexif()
             if exif:
                 # 36867: DateTimeOriginal, 36868: DateTimeDigitized, 306: DateTime
@@ -132,7 +162,7 @@ def calculate_sha1_b64(filepath: Path) -> Optional[str]:
     """Compute Base64-encoded SHA-1 checksum of a file using 1MB chunk buffer."""
     try:
         sha1 = hashlib.sha1()
-        with open(filepath, 'rb') as f:
+        with open(to_extended_path(filepath), 'rb') as f:
             while chunk := f.read(1048576):  # 1MB buffer for faster disk I/O
                 sha1.update(chunk)
         return base64.b64encode(sha1.digest()).decode('utf-8')

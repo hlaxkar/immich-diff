@@ -21,6 +21,13 @@ from .utils import format_size, load_dotenv
 
 def main():
     """Main CLI entrypoint for immich-diff."""
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
     load_dotenv()
     parser = argparse.ArgumentParser(
         prog="immich-diff",
