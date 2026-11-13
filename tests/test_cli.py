@@ -35,6 +35,21 @@ class TestCLI(unittest.TestCase):
                 # Should cleanly exit when no files found
                 main()
 
+    def test_cli_visual_strategy_flags(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            test_args = [
+                "immich-diff",
+                "-d", temp_dir,
+                "-k", "test_key",
+                "-s", "visual",
+                "--similarity-threshold", "95.0",
+                "--max-distance", "3",
+                "--no-cache",
+                "--dry-run"
+            ]
+            with patch('sys.argv', test_args):
+                main()
+
 
 if __name__ == '__main__':
     unittest.main()

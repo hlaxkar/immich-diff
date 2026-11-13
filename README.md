@@ -15,6 +15,7 @@ It reports exact backup coverage, identifies unmatched local files, highlights f
   * **SHA-1 Checksum [Exact]**: Deterministic Base64 SHA-1 hashes (chunked 1MB buffer for fast I/O).
   * **EXIF Capture Date [Review]**: Matches image capture timestamps from EXIF metadata (`DateTimeOriginal`).
   * **Filename [Review]**: Matches original filenames (useful for finding compressed / lower-resolution copies on Immich).
+  * **Visual pHash [Opt-in with `-s visual`]**: 64-bit Discrete Cosine Transform (DCT) perceptual hashing. Matches visually identical photos across compression (WhatsApp, Telegram), format conversions (`.HEIC` vs `.JPG` vs `.WebP`), and stripped EXIF data with zero external ML dependencies.
 * **Optimized Dual Lookup Modes**:
   * **Direct Mode (Batched API Calls)**: Uses Immich's `POST /api/assets/bulk-upload-check` endpoint to verify 100+ local file checksums in **a single HTTP request** (reducing network calls by 99%).
   * **Bulk Mode**: In-memory O(1) indexed lookup after downloading full server metadata for large photo libraries.
@@ -25,7 +26,7 @@ It reports exact backup coverage, identifies unmatched local files, highlights f
 * **Safe Duplicate Handling**:
   * Supports `--dry-run` to preview actions before touching any files.
   * Preserves relative folder structure when moving local duplicates.
-  * Separates duplicates into isolated strategy folders (`checksum/`, `exif/`, and `filename/`) for easy inspection.
+  * Separates duplicates into isolated strategy folders (`checksum/`, `exif/`, `filename/`, and `visual/`) for easy inspection.
 * **Detailed Backup Statistics Report**:
   * Full breakdown of backed up vs. unique local files.
   * Local vs. Immich file size diffs (local larger, local smaller, identical).
@@ -59,6 +60,12 @@ Run a **dry-run** comparison scan against a local media directory:
 
 ```bash
 immich-diff -d /path/to/local/photos -u http://192.168.1.100:2283 -k YOUR_IMMICH_API_KEY --dry-run
+```
+
+Run a **visual similarity duplicate scan** (catches compressed, resized, and converted photos):
+
+```bash
+immich-diff -d /path/to/local/photos -k YOUR_API_KEY -s visual --similarity-threshold 92 --dry-run
 ```
 
 Execute duplicate separation (moves duplicate files to `../duplicate` by default):
@@ -133,9 +140,13 @@ When `.env` is present, you can run `immich-diff -d /path/to/media` without expl
 | `-m` | `--move` | `False` | Move duplicate files out of the local media directory. |
 | `-n` | `--dry-run` | `False` | Perform a dry-run without moving any files. |
 | `-o` | `--output-dir` | `../duplicate` | Custom destination directory for moved duplicate files. |
-| `-s` | `--strategy` | `all` | Matching strategy (`all`, `checksum`, `exif`, `filename`). |
+| `-s` | `--strategy` | `all` | Matching strategy (`all`, `checksum`, `exif`, `filename`, `visual`). |
 | `-fm`| `--fetch-mode` | `auto` | Lookup mode (`auto`, `direct`, `bulk`). |
 | `-w` | `--workers` | `auto` | Number of concurrent worker threads. |
+|      | `--similarity-threshold` | `92.0` | Minimum visual similarity percentage for visual strategy. |
+|      | `--max-distance` | `None` | Maximum Hamming distance for visual strategy (overrides similarity threshold). |
+|      | `--cache-dir` | `~/.cache/immich-diff` | Directory for SQLite visual hash cache database. |
+|      | `--no-cache` | `False` | Disable reading or writing to SQLite hash cache. |
 |      | `--download-matched` | `False` | Download matching Immich assets to `_matched` directory when moving duplicates. |
 | `-v` | `--verbose` | `False` | Enable debug logging output. |
 

@@ -99,8 +99,58 @@ class ImmichClient:
             logger.debug("bulk_upload_check API error: %s", e)
         return []
 
-    def fetch_all_assets(self, show_progress: bool = True) -> List[Dict[str, Any]]:
-        """Bulk fetch all assets from Immich API using pagination."""
+    def fetch_all_assets(
+        self,
+        show_progress: bool = True,
+        cache: Optional[Any] = None,
+        force_refresh: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch all assets from Immich. If a cache is provided, utilizes incremental delta sync
+        (via updatedAfter filter) and loads pre-cached metadata from SQLite in milliseconds.
+        """
+        # Incremental Delta Sync with Cache
+        if cache and getattr(cache, "enabled", False) and not force_refresh:
+            cached_count = cache.get_immich_asset_count()
+            last_sync = cache.get_last_asset_sync_time()
+
+            if cached_count > 0 and last_sync:
+                delta_assets = []
+                page = 1
+                page_size = 1000
+                while True:
+                    try:
+                        data = self._post('search/metadata', {
+                            'size': page_size,
+                            'page': page,
+                            'withExif': True,
+                            'updatedAfter': last_sync
+                        })
+                    except ImmichAPIError as e:
+                        logger.debug("search/metadata updatedAfter query error: %s", e)
+                        break
+
+                    if not data:
+                        break
+                    items = data.get('assets', {}).get('items', [])
+                    if not items:
+                        break
+                    delta_assets.extend(items)
+                    if len(items) < page_size:
+                        break
+                    page += 1
+
+                if delta_assets:
+                    cache.upsert_immich_assets(delta_assets)
+                    if show_progress:
+                        print(f"--> Incremental sync: {len(delta_assets):,} new/updated assets from Immich.", flush=True)
+                else:
+                    if show_progress:
+                        print(f"--> Immich asset index is up-to-date ({cached_count:,} assets loaded from cache).", flush=True)
+
+                return cache.get_all_immich_assets()
+
+        # Full Sync from Immich Server
         assets = []
         page = 1
         page_size = 1000
@@ -133,22 +183,27 @@ class ImmichClient:
             if pbar is not None:
                 pbar.__exit__(None, None, None)
 
-        if assets:
-            return assets
+        if not assets:
+            # Fallback to GET /api/asset or GET /api/assets for older Immich server versions
+            for endpoint in ['asset', 'assets']:
+                try:
+                    res_data = self._get(endpoint)
+                    if isinstance(res_data, list):
+                        assets = res_data
+                        break
+                    elif isinstance(res_data, dict):
+                        items = res_data.get('assets', {}).get('items') or res_data.get('items')
+                        if isinstance(items, list) and items:
+                            assets = items
+                            break
+                except ImmichDiffError as e:
+                    logger.debug("Fallback endpoint %s failed: %s", endpoint, e)
+                    continue
 
-        # Fallback to GET /api/asset or GET /api/assets for older Immich server versions
-        for endpoint in ['asset', 'assets']:
-            try:
-                res_data = self._get(endpoint)
-                if isinstance(res_data, list):
-                    return res_data
-                elif isinstance(res_data, dict):
-                    items = res_data.get('assets', {}).get('items') or res_data.get('items')
-                    if isinstance(items, list) and items:
-                        return items
-            except ImmichDiffError as e:
-                logger.debug("Fallback endpoint %s failed: %s", endpoint, e)
-                continue
+        if assets and cache and getattr(cache, "enabled", False):
+            if force_refresh:
+                cache.clear_immich_assets()
+            cache.upsert_immich_assets(assets)
 
         return assets
 
@@ -185,3 +240,20 @@ class ImmichClient:
             except Exception as e:
                 logger.debug("Failed downloading asset %s via %s: %s", asset_id, ep, e)
         return False
+
+    def fetch_asset_thumbnail(self, asset_id: str) -> Optional[bytes]:
+        """Fetch asset thumbnail bytes from Immich."""
+        if not asset_id:
+            return None
+
+        endpoints = [f"assets/{asset_id}/thumbnail", f"asset/file/{asset_id}?isThumb=true"]
+        for ep in endpoints:
+            url = f"{self.base_url}/{ep.lstrip('/')}"
+            req = urllib.request.Request(url, headers={'x-api-key': self.api_key, 'User-Agent': 'ImmichMediaComparator/1.0.0'})
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    if resp.status == 200:
+                        return resp.read()
+            except Exception as e:
+                logger.debug("Failed fetching thumbnail for asset %s via %s: %s", asset_id, ep, e)
+        return None

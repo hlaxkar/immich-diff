@@ -119,6 +119,28 @@ class TestImmichClient(unittest.TestCase):
             self.assertEqual(assets[0]['id'], 'asset-0')
             self.assertEqual(assets[-1]['id'], 'asset-1049')
 
+    def test_fetch_all_assets_incremental_cache(self):
+        mock_cache = MagicMock()
+        mock_cache.enabled = True
+        mock_cache.get_immich_asset_count.return_value = 100
+        mock_cache.get_last_asset_sync_time.return_value = '2024-01-01T10:00:00.000Z'
+        mock_cache.get_all_immich_assets.return_value = [{'id': f'asset-{i}'} for i in range(101)]
+
+        # Immich returns 1 new delta asset for updatedAfter query
+        delta_resp = MagicMock()
+        delta_resp.status = 200
+        delta_resp.read.return_value = json.dumps({
+            "assets": {"items": [{"id": "asset-100", "updatedAt": "2024-01-02T10:00:00.000Z"}]}
+        }).encode('utf-8')
+        delta_resp.__enter__.return_value = delta_resp
+        delta_resp.__exit__.return_value = None
+
+        with patch('urllib.request.urlopen', return_value=delta_resp):
+            assets = self.client.fetch_all_assets(show_progress=False, cache=mock_cache)
+            self.assertEqual(len(assets), 101)
+            mock_cache.upsert_immich_assets.assert_called_once()
+            mock_cache.get_all_immich_assets.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()

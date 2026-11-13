@@ -96,7 +96,11 @@ def compare_local_files(
     strategy: str = 'all',
     fetch_mode: str = 'auto',
     max_workers: int = DEFAULT_WORKERS,
-    batch_size: int = 100
+    batch_size: int = 100,
+    cache: Optional[Any] = None,
+    max_distance: Optional[int] = None,
+    similarity_threshold: Optional[float] = None,
+    force_refresh: bool = False
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str]:
     """
     Compare local files against Immich assets with deterministic safety checks.
@@ -104,8 +108,125 @@ def compare_local_files(
       1. Checksum (exact cryptographic match)
       2. EXIF Timestamp (+ Size verification)
       3. Filename (+ Size verification)
+    When strategy='visual':
+      Performs perceptual hashing (pHash) and Hamming distance comparison against Immich thumbnails.
     Returns (backed_up_items, not_backed_up_files, actual_fetch_mode).
     """
+    backed_up = []
+    not_backed_up = []
+
+    # Visual perceptual hash matching strategy (opt-in)
+    if strategy == 'visual':
+        from datetime import datetime, timezone
+        from .cache import HashCache
+        from .visual import compute_phash, hamming_distance, similarity_percentage
+
+        if cache is None:
+            cache = HashCache(enabled=True)
+
+        if max_distance is not None:
+            effective_max_dist = max_distance
+        elif similarity_threshold is not None:
+            effective_max_dist = int((100.0 - similarity_threshold) / 100.0 * 64)
+        else:
+            effective_max_dist = 5  # default ~92.2% similarity (Hamming distance <= 5)
+
+        actual_mode = 'bulk'
+        immich_assets = client.fetch_all_assets(cache=cache, force_refresh=force_refresh)
+        if not immich_assets:
+            return [], list(local_files), actual_mode
+
+        # 1. Retrieve cached Immich visual hashes
+        asset_ids = [a.get('id') or a.get('assetId') for a in immich_assets if (a.get('id') or a.get('assetId'))]
+        cached_immich = cache.get_immich_hashes(asset_ids) if cache.enabled else {}
+
+        missing_assets = [a for a in immich_assets if (a.get('id') or a.get('assetId')) not in cached_immich]
+
+        # 2. Fetch and index any missing Immich thumbnails
+        if missing_assets:
+            def fetch_and_hash_immich(asset: Dict[str, Any]) -> Tuple[str, Optional[int]]:
+                aid = asset.get('id') or asset.get('assetId')
+                thumb = client.fetch_asset_thumbnail(aid)
+                if thumb:
+                    h = compute_phash(thumb)
+                    return aid, h
+                return aid, None
+
+            new_entries = []
+            now_iso = datetime.now(timezone.utc).isoformat()
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(fetch_and_hash_immich, a): a for a in missing_assets}
+                for f in tqdm(as_completed(futures), total=len(futures), desc="Indexing Immich visual hashes", file=sys.stdout):
+                    aid, h = f.result()
+                    if h is not None:
+                        cached_immich[aid] = h
+                        new_entries.append((aid, h, now_iso))
+
+            if new_entries and cache.enabled:
+                cache.set_immich_hashes_batch(new_entries)
+
+        # Build list of valid (asset, phash) pairs
+        immich_hash_pairs = []
+        for asset in immich_assets:
+            aid = asset.get('id') or asset.get('assetId')
+            h = cached_immich.get(aid)
+            if h is not None:
+                immich_hash_pairs.append((asset, h))
+
+        # 3. Hash local files and find visual duplicates
+        def evaluate_local_visual(lf: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[int]]:
+            fpath = lf['full_path']
+            try:
+                st = fpath.stat()
+                mtime, size = st.st_mtime, st.st_size
+            except OSError:
+                return lf, None, None
+
+            local_h = cache.get_local_hash(str(fpath), mtime, size) if cache.enabled else None
+            if local_h is None:
+                local_h = compute_phash(fpath)
+                if local_h is not None and cache.enabled:
+                    cache.set_local_hash(str(fpath), mtime, size, local_h)
+
+            if local_h is None:
+                return lf, None, None
+
+            best_asset = None
+            min_dist = 65
+
+            for asset, s_hash in immich_hash_pairs:
+                d = hamming_distance(local_h, s_hash)
+                if d < min_dist:
+                    min_dist = d
+                    best_asset = asset
+                    if d == 0:
+                        break
+
+            if best_asset and min_dist <= effective_max_dist:
+                return lf, best_asset, min_dist
+
+            return lf, None, None
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(evaluate_local_visual, lf) for lf in local_files]
+            for f in tqdm(as_completed(futures), total=len(futures), desc="Comparing local files visually with Immich", file=sys.stdout):
+                lf, matched_asset, dist = f.result()
+                if matched_asset is not None and dist is not None:
+                    immich_size = parse_immich_file_size(matched_asset)
+                    backed_up.append({
+                        'local': lf,
+                        'immich': matched_asset,
+                        'immich_size': immich_size,
+                        'diff': lf['size'] - immich_size,
+                        'match_reason': 'VISUAL_SIMILARITY',
+                        'hamming_distance': dist,
+                        'similarity': similarity_percentage(dist)
+                    })
+                else:
+                    not_backed_up.append(lf)
+
+        return backed_up, not_backed_up, actual_mode
+
     use_fn = strategy in ('all', 'filename')
     use_cs = strategy in ('all', 'checksum')
     use_ex = strategy in ('all', 'exif')
@@ -116,11 +237,8 @@ def compare_local_files(
     else:
         actual_mode = fetch_mode
 
-    backed_up = []
-    not_backed_up = []
-
     if actual_mode == 'bulk':
-        immich_assets = client.fetch_all_assets()
+        immich_assets = client.fetch_all_assets(cache=cache, force_refresh=force_refresh)
         by_filename, by_checksum, by_exif = build_immich_index(immich_assets) if immich_assets else ({}, {}, {})
 
         def evaluate_file(lf: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], str]:

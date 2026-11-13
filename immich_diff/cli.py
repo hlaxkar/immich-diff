@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 
+from .cache import HashCache
 from .client import ImmichClient
 from .comparator import (
     DEFAULT_WORKERS,
@@ -40,9 +41,14 @@ def main():
     parser.add_argument('-m', '--move', action='store_true', help="Move duplicate files into duplicates directory")
     parser.add_argument('-n', '--dry-run', action='store_true', help="Perform dry-run without moving files")
     parser.add_argument('-o', '--output-dir', default=None, type=str, help="Directory for moved duplicates (default: ../duplicate)")
-    parser.add_argument('-s', '--strategy', choices=['all', 'checksum', 'exif', 'filename'], default='all', help="Matching strategy (all prioritizes checksum first, then exif, then filename)")
+    parser.add_argument('-s', '--strategy', choices=['all', 'checksum', 'exif', 'filename', 'visual'], default='all', help="Matching strategy (all prioritizes checksum first, then exif, then filename; visual performs perceptual hash comparison)")
     parser.add_argument('-fm', '--fetch-mode', choices=['auto', 'direct', 'bulk'], default='auto', help="Lookup mode: direct (batched API queries), bulk (download full server index), auto (smart threshold)")
     parser.add_argument('-w', '--workers', default=DEFAULT_WORKERS, type=int, help="Number of concurrent worker threads")
+    parser.add_argument('--similarity-threshold', default=92.0, type=float, help="Minimum visual similarity percentage for visual strategy (default: 92.0)")
+    parser.add_argument('--max-distance', default=None, type=int, help="Maximum Hamming distance for visual strategy (overrides --similarity-threshold if set)")
+    parser.add_argument('--cache-dir', default=None, type=str, help="Directory for SQLite hash cache database (default: ~/.cache/immich-diff)")
+    parser.add_argument('--no-cache', action='store_true', help="Disable visual hash caching")
+    parser.add_argument('--refresh-index', action='store_true', help="Force a complete re-sync of the server asset metadata index")
     parser.add_argument('--download-matched', action='store_true', help="Download matching Immich assets to _matched directory when moving duplicates")
     parser.add_argument('-v', '--verbose', action='store_true', help="Enable debug logging output")
 
@@ -61,6 +67,7 @@ def main():
 
     is_dry_run = True if args.dry_run or not args.move else False
     client = ImmichClient(args.url, args.api_key)
+    cache = HashCache(cache_dir=Path(args.cache_dir) if args.cache_dir else None, enabled=not args.no_cache)
 
     # 1. Scan local files
     print(f"--> Scanning directory: {scanned_dir} ...", flush=True)
@@ -69,6 +76,7 @@ def main():
 
     if not local_files:
         print("No media files found to compare. Exiting.", flush=True)
+        cache.close()
         return
 
     # 2. Compare local files with Immich
@@ -79,18 +87,24 @@ def main():
             local_files=local_files,
             strategy=args.strategy,
             fetch_mode=args.fetch_mode,
-            max_workers=args.workers
+            max_workers=args.workers,
+            cache=cache,
+            max_distance=args.max_distance,
+            similarity_threshold=args.similarity_threshold,
+            force_refresh=args.refresh_index
         )
     except ImmichDiffError as e:
+        cache.close()
         sys.exit(f"\nError: {e}")
     except Exception as e:
+        cache.close()
         if args.verbose:
             raise
         sys.exit(f"\nUnexpected error during comparison: {e}")
 
     # 3. Categorize Results
-    match_reasons = {'CHECKSUM': 0, 'EXIF_TIMESTAMP': 0, 'FILENAME': 0}
-    match_reason_sizes = {'CHECKSUM': 0, 'EXIF_TIMESTAMP': 0, 'FILENAME': 0}
+    match_reasons = {'CHECKSUM': 0, 'EXIF_TIMESTAMP': 0, 'FILENAME': 0, 'VISUAL_SIMILARITY': 0}
+    match_reason_sizes = {'CHECKSUM': 0, 'EXIF_TIMESTAMP': 0, 'FILENAME': 0, 'VISUAL_SIMILARITY': 0}
     larger_local, smaller_local, equal_size, unknown_size = [], [], [], []
 
     total_local_size = sum(f['size'] for f in local_files)
@@ -145,6 +159,8 @@ def main():
     print(f"    - Matched by SHA-1 Hash:     {match_reasons.get('CHECKSUM', 0):,} files ({format_size(match_reason_sizes.get('CHECKSUM', 0))}) [Exact]")
     print(f"    - Matched by EXIF Timestamp: {match_reasons.get('EXIF_TIMESTAMP', 0):,} files ({format_size(match_reason_sizes.get('EXIF_TIMESTAMP', 0))}) [Review]")
     print(f"    - Matched by Filename:       {match_reasons.get('FILENAME', 0):,} files ({format_size(match_reason_sizes.get('FILENAME', 0))}) [Review]")
+    if match_reasons.get('VISUAL_SIMILARITY', 0) > 0 or args.strategy == 'visual':
+        print(f"    - Matched by Visual (pHash): {match_reasons.get('VISUAL_SIMILARITY', 0):,} files ({format_size(match_reason_sizes.get('VISUAL_SIMILARITY', 0))}) [Perceptual]")
     print(f"  ✗ Not Backed Up (Unique):  {len(not_backed_up):,} files ({format_size(not_backed_up_size)}) [{not_backed_up_pct:.2f}%]")
 
     print("\nFILE SIZE COMPARISON (Matched Assets):")
@@ -166,6 +182,7 @@ def main():
     checksum_matches = [item for item in backed_up if item['match_reason'] == 'CHECKSUM']
     exif_matches = [item for item in backed_up if item['match_reason'] == 'EXIF_TIMESTAMP']
     filename_matches = [item for item in backed_up if item['match_reason'] == 'FILENAME']
+    visual_matches = [item for item in backed_up if item['match_reason'] == 'VISUAL_SIMILARITY']
 
     print("-" * 80)
     if backed_up:
@@ -177,6 +194,8 @@ def main():
                 print(f"  • Would move {len(exif_matches):,} EXIF timestamp matches to:     {duplicates_base_dir}/exif/")
             if filename_matches:
                 print(f"  • Would move {len(filename_matches):,} filename matches to:           {duplicates_base_dir}/filename/")
+            if visual_matches:
+                print(f"  • Would move {len(visual_matches):,} visual pHash matches to:       {duplicates_base_dir}/visual/")
             print("\nTo execute actual moving of files, re-run with --move flag.")
         else:
             if checksum_matches:
@@ -214,10 +233,23 @@ def main():
                     download_matched=args.download_matched
                 )
                 print(f"Successfully moved {moved:,} filename matches (Errors: {errs}).")
+
+            if visual_matches:
+                print(f"\n[MOVE] Moving {len(visual_matches):,} visual matches to {duplicates_base_dir}/visual/ ...")
+                moved, errs = process_duplicate_moves(
+                    client=client,
+                    items=visual_matches,
+                    base_dest_dir=duplicates_base_dir,
+                    subfolder="visual",
+                    desc="Moving visual matches",
+                    download_matched=args.download_matched
+                )
+                print(f"Successfully moved {moved:,} visual matches (Errors: {errs}).")
     else:
         print("\nNo duplicate files found to move.")
 
     print("=" * 80 + "\n")
+    cache.close()
 
 
 if __name__ == '__main__':
